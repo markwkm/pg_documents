@@ -1,9 +1,7 @@
 /* -------------------------------------------------------------------------
  *
- * pg_httpd.c
- *		HTTP daemon.
- *
- * Try to be an HTTP interface.
+ * pg_documents.c
+ *		JSON document management with an HTTP interface
  *
  * Copyright (C) 2013, Mark Wong
  *
@@ -26,23 +24,23 @@
 #include "pgstat.h"
 #include "tcop/utility.h"
 
-#define DEFAULT_PG_HTTPD_MAX_SOCKETS 5
-#define DEFAULT_PG_HTTPD_PORT 8888
-#define DEFAULT_PG_HTTPD_QUEUE_DEPTH 32
+#define DEFAULT_PG_DOCUMENTS_MAX_SOCKETS 5
+#define DEFAULT_PG_DOCUMENTS_PORT 8888
+#define DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH 32
 
 PG_MODULE_MAGIC;
 
 void _PG_init(void);
-void pg_httpd_main(Datum);
+void pg_documents_main(Datum);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
-static int pg_httpd_max_sockets = DEFAULT_PG_HTTPD_MAX_SOCKETS;
-static int pg_httpd_port = DEFAULT_PG_HTTPD_PORT;
-static int pg_httpd_queue_depth = DEFAULT_PG_HTTPD_QUEUE_DEPTH;
+static int pg_documents_max_sockets = DEFAULT_PG_DOCUMENTS_MAX_SOCKETS;
+static int pg_documents_port = DEFAULT_PG_DOCUMENTS_PORT;
+static int pg_documents_queue_depth = DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH;
 
 /*
  * Signal handler for SIGTERM
@@ -50,7 +48,7 @@ static int pg_httpd_queue_depth = DEFAULT_PG_HTTPD_QUEUE_DEPTH;
  *		it up.
  */
 static void
-pg_httpd_sigterm(SIGNAL_ARGS)
+pg_documents_sigterm(SIGNAL_ARGS)
 {
 	int save_errno = errno;
 
@@ -67,7 +65,7 @@ pg_httpd_sigterm(SIGNAL_ARGS)
  *		our latch to wake it up.
  */
 static void
-pg_httpd_sighup(SIGNAL_ARGS)
+pg_documents_sighup(SIGNAL_ARGS)
 {
 	got_sighup = true;
 	if (MyProc)
@@ -75,7 +73,7 @@ pg_httpd_sighup(SIGNAL_ARGS)
 }
 
 void
-pg_httpd_main(Datum main_arg)
+pg_documents_main(Datum main_arg)
 {
 	int i;
 
@@ -92,11 +90,11 @@ pg_httpd_main(Datum main_arg)
 	struct timeval timeout;
 	int readsocks;
 
-	connectlist = (int *) palloc(sizeof(int) * pg_httpd_max_sockets);
+	connectlist = (int *) palloc(sizeof(int) * pg_documents_max_sockets);
 
 	/* Establish signal handlers before unblocking signals. */
-	pqsignal(SIGHUP, pg_httpd_sighup);
-	pqsignal(SIGTERM, pg_httpd_sigterm);
+	pqsignal(SIGHUP, pg_documents_sighup);
+	pqsignal(SIGTERM, pg_documents_sigterm);
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -107,7 +105,7 @@ pg_httpd_main(Datum main_arg)
 	memset(&sa, 0, sizeof(struct sockaddr_in));
 	sa.sin_family = AF_INET;
 	sa.sin_addr.s_addr = INADDR_ANY;
-	sa.sin_port = htons((unsigned short) pg_httpd_port);
+	sa.sin_port = htons((unsigned short) pg_documents_port);
 
 	socket_listener = socket(PF_INET, SOCK_STREAM, 0);
 	if (socket_listener < 0)
@@ -129,14 +127,14 @@ pg_httpd_main(Datum main_arg)
 		proc_exit(1);
 	}
 
-	if (listen(socket_listener, pg_httpd_queue_depth) < 0)
+	if (listen(socket_listener, pg_documents_queue_depth) < 0)
 	{
 		elog(ERROR, "listen() error");
 		proc_exit(1);
 	}
 
 	highsock = socket_listener;
-	for (i = 0; i < pg_httpd_max_sockets; i++)
+	for (i = 0; i < pg_documents_max_sockets; i++)
 		connectlist[i] = 0;
 
 	/*
@@ -185,7 +183,7 @@ pg_httpd_main(Datum main_arg)
 		FD_ZERO(&socks);
 		FD_SET(socket_listener, &socks);
 
-		for (i = 0; i < pg_httpd_max_sockets; i++)
+		for (i = 0; i < pg_documents_max_sockets; i++)
 		{
 			if (connectlist[i] != 0)
 			{
@@ -221,7 +219,7 @@ pg_httpd_main(Datum main_arg)
 					continue;
 				}
 
-				for (i = 0; (i < pg_httpd_max_sockets) && (sockfd != -1); i++)
+				for (i = 0; (i < pg_documents_max_sockets) && (sockfd != -1); i++)
 					if (connectlist[i] == 0)
 					{
 						connectlist[i] = sockfd;
@@ -236,7 +234,7 @@ pg_httpd_main(Datum main_arg)
 				}
 			}
 
-			for (i = 0; i < pg_httpd_max_sockets; i++)
+			for (i = 0; i < pg_documents_max_sockets; i++)
 			{
 				if (FD_ISSET(connectlist[i], &socks))
 				{
@@ -275,11 +273,11 @@ _PG_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		return;
 
-	DefineCustomIntVariable("pg_httpd.max_sockets",
+	DefineCustomIntVariable("pg_documents.max_sockets",
 			"HTTPD maximum number of connected clients.",
 			NULL,
-			&pg_httpd_max_sockets,
-			DEFAULT_PG_HTTPD_MAX_SOCKETS,
+			&pg_documents_max_sockets,
+			DEFAULT_PG_DOCUMENTS_MAX_SOCKETS,
 			1,
 			65535,
 			PGC_POSTMASTER,
@@ -288,11 +286,11 @@ _PG_init(void)
 			NULL,
 			NULL);
 
-	DefineCustomIntVariable("pg_httpd.port",
+	DefineCustomIntVariable("pg_documents.port",
 			"HTTPD listener port.",
 			NULL,
-			&pg_httpd_port,
-			DEFAULT_PG_HTTPD_PORT,
+			&pg_documents_port,
+			DEFAULT_PG_DOCUMENTS_PORT,
 			1,
 			65535,
 			PGC_POSTMASTER,
@@ -301,11 +299,11 @@ _PG_init(void)
 			NULL,
 			NULL);
 
-	DefineCustomIntVariable("pg_httpd.queue_depth",
+	DefineCustomIntVariable("pg_documents.queue_depth",
 			"HTTPD maximum queue length.",
 			NULL,
-			&pg_httpd_queue_depth,
-			DEFAULT_PG_HTTPD_QUEUE_DEPTH,
+			&pg_documents_queue_depth,
+			DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH,
 			1,
 			128,
 			PGC_POSTMASTER,
@@ -319,10 +317,10 @@ _PG_init(void)
 			BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = 1;
-	worker.bgw_main = pg_httpd_main;
-	worker.bgw_sighup = pg_httpd_sighup;
-	worker.bgw_sigterm = pg_httpd_sigterm;
-	worker.bgw_name = "pg_httpd";
+	worker.bgw_main = pg_documents_main;
+	worker.bgw_sighup = pg_documents_sighup;
+	worker.bgw_sigterm = pg_documents_sigterm;
+	worker.bgw_name = "pg_documents";
 
 	RegisterBackgroundWorker(&worker);
 }

@@ -1,17 +1,17 @@
-# pg_httpd
+# pg_documents
 
-The pg_httpd module provides an HTTP daemon.
+The pg_documents module provides an HTTP daemon.
 
 ## Configuration Paramters
 
-pg_httpd.max_sockets
+pg_documents.max_sockets
 
     Maximum number of connections.
 
-pg_httpd.port
+pg_documents.port
 
     Port to listen to for HTTP requests.
 
-pg_httpd.queue_depth
+pg_documents.queue_depth
 
     Queue size for HTTPD listener.
