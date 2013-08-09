@@ -1,6 +1,7 @@
 # pg_documents
 
-The pg_documents module provides an HTTP daemon.
+The pg_documents module provides an HTTP daemon and was developed using json-c
+v0.11.
 
 ## Configuration Paramters
 

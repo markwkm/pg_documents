@@ -24,14 +24,32 @@
 #include "pgstat.h"
 #include "tcop/utility.h"
 
+#include "json-c/json.h"
+
 #define DEFAULT_PG_DOCUMENTS_MAX_SOCKETS 5
 #define DEFAULT_PG_DOCUMENTS_PORT 8888
 #define DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH 32
 
 PG_MODULE_MAGIC;
 
+struct pg_documents_reply
+{
+	int status;
+	StringInfoData reason;
+};
+
+struct pg_documents_context
+{
+	struct pg_documents_reply reply;
+
+	json_object *jsono;
+};
+
 void _PG_init(void);
+void pg_documents_free_context(struct pg_documents_context *);
 void pg_documents_main(Datum);
+void pg_documents_process_request(struct pg_documents_context *);
+void pg_documents_respond(struct pg_documents_context *, int);
 
 /* flags set by signal handlers */
 static volatile sig_atomic_t got_sighup = false;
@@ -73,6 +91,14 @@ pg_documents_sighup(SIGNAL_ARGS)
 }
 
 void
+pg_documents_free_context(struct pg_documents_context *pgdc)
+{
+	resetStringInfo(&pgdc->reply.reason);
+
+	json_object_put(pgdc->jsono);
+}
+
+void
 pg_documents_main(Datum main_arg)
 {
 	int i;
@@ -82,15 +108,17 @@ pg_documents_main(Datum main_arg)
 	int socket_listener;
 	int flags;
 
-	StringInfoData reply;
-
 	int highsock;
 	int *connectlist;
 	fd_set socks;
 	struct timeval timeout;
 	int readsocks;
 
+	struct pg_documents_context pgdc;
+
+	/* Initialize stuff. */
 	connectlist = (int *) palloc(sizeof(int) * pg_documents_max_sockets);
+	initStringInfo(&pgdc.reply.reason);
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, pg_documents_sighup);
@@ -140,7 +168,6 @@ pg_documents_main(Datum main_arg)
 	/*
 	 * Main loop: do this until the SIGTERM handler tells us to terminate
 	 */
-	initStringInfo(&reply);
 	while (!got_sigterm)
 	{
 		int rc;
@@ -153,8 +180,8 @@ pg_documents_main(Datum main_arg)
 		char data[length];
 		int count;
 
-		/* HTTP stuff */
-		int content_length;
+		json_object *jsono;
+
 
 		/*
 		 * Background workers mustn't call usleep() or any direct equivalent:
@@ -241,21 +268,50 @@ pg_documents_main(Datum main_arg)
 					memset(data, 0, sizeof(data));
 					received = recv(connectlist[i], data, length, 0);
 
-					content_length = 12;
-					appendStringInfo(&reply,
-							"HTTP/1.0 200 OK\r\n"
-							"Content-Length: %d\r\n\r\n"
-							"Hello world!",
-							content_length);
-					send(connectlist[i], reply.data, strlen(reply.data), 0);
-					close(connectlist[i]);
+					pg_documents_process_request(&pgdc);
+					pg_documents_respond(&pgdc, connectlist[i]);
+
 					connectlist[i] = 0;
+
+					pg_documents_free_context(&pgdc);
 				}
 			}
 		}
 	}
 
 	proc_exit(1);
+}
+
+void
+pg_documents_process_request(struct pg_documents_context *pgdc)
+{
+	pgdc->reply.status = 200;
+	appendStringInfo(&pgdc->reply.reason, "OK");
+
+	pgdc->jsono = json_object_new_object();
+	json_object_object_add(pgdc->jsono, "postgresql",
+			json_object_new_string("Welcome"));
+}
+
+void
+pg_documents_respond(struct pg_documents_context *pgdc, int sockfd)
+{
+	char *body;
+	int content_length;
+	StringInfoData reply;
+
+	initStringInfo(&reply);
+
+	body = json_object_to_json_string(pgdc->jsono);
+
+	content_length = strlen(body);
+	appendStringInfo(&reply,
+			"HTTP/1.0 %d %s\r\n"
+			"Content-Length: %d\r\n\r\n"
+			"%s",
+			pgdc->reply.status, pgdc->reply.reason.data, content_length, body);
+	send(sockfd, reply.data, strlen(reply.data), 0);
+	close(sockfd);
 }
 
 /*
