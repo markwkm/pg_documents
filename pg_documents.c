@@ -71,9 +71,12 @@ struct pg_documents_context
 
 void _PG_init(void);
 void pg_documents_all_tables(struct pg_documents_context *);
+void pg_documents_create_document(struct pg_documents_context *);
 void pg_documents_create_document_table(struct pg_documents_context *);
+void pg_documents_delete_document(struct pg_documents_context *);
 void pg_documents_delete_document_table(struct pg_documents_context *);
 void pg_documents_free_context(struct pg_documents_context *);
+void pg_documents_get_document(struct pg_documents_context *);
 void pg_documents_main(Datum);
 void pg_documents_parse_request(struct pg_documents_context *, char *);
 void pg_documents_process_request(struct pg_documents_context *);
@@ -159,7 +162,130 @@ pg_documents_all_tables(struct pg_documents_context *pgdc)
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 	pgstat_report_activity(STATE_IDLE, NULL);
+
+	pgdc->reply.status = 200;
+	appendStringInfo(&pgdc->reply.reason, "OK");
 }
+
+void
+pg_documents_create_document(struct pg_documents_context *pgdc)
+{
+	int i;
+	int ret;
+	StringInfoData buf;
+	Oid types[2];
+	Datum values[2];
+	int count;
+	bool isnull;
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	elog(DEBUG1, "%s creating/updating document in %s",
+			MyBgworkerEntry->bgw_name, pgdc->uric.tablename);
+
+	pgdc->jsono = json_object_new_object();
+	json_object_object_add(pgdc->jsono, "ok", json_object_new_boolean(1));
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "creating/updating document");
+
+	initStringInfo(&buf);
+
+	if (pgdc->uric.id == NULL)
+	{
+		appendStringInfo(&buf,
+				"INSERT INTO \"%s\" (document) "
+				"VALUES ($1)"
+				"RETURNING id",
+				pgdc->uric.tablename);
+		types[0] = JSONOID;
+		values[0] = CStringGetTextDatum(pgdc->request.body);
+		ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, false, 0);
+		if (ret != SPI_OK_INSERT_RETURNING)
+			elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+		tupdesc = SPI_tuptable->tupdesc;
+		tuptable = SPI_tuptable;
+		tuple = tuptable->vals[0];
+		json_object_object_add(pgdc->jsono, "id",
+				json_object_new_string(SPI_getvalue(tuple, tupdesc, 1)));
+		appendStringInfo(&pgdc->reply.reason, "Created");
+	}
+	else
+	{
+		appendStringInfo(&buf,
+				"SELECT count(*) "
+				"FROM \"%s\" "
+				"WHERE id = $1",
+				pgdc->uric.tablename);
+		types[0] = TEXTOID;
+		values[0] = CStringGetTextDatum(pgdc->uric.id);
+		ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, true, 0);
+		if (ret != SPI_OK_SELECT)
+			elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+		tupdesc = SPI_tuptable->tupdesc;
+		tuptable = SPI_tuptable;
+		tuple = tuptable->vals[0];
+
+		count = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+		elog(DEBUG1, "%d copies of document %s found in %s",
+				count, pgdc->uric.id, pgdc->uric.tablename);
+		if (count == 0)
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf,
+					"INSERT INTO \"%s\" (id, document) "
+					"VALUES ($1, $2)",
+					pgdc->uric.tablename);
+			types[0] = TEXTOID;
+			values[0] = CStringGetTextDatum(pgdc->uric.id);
+			types[1] = JSONOID;
+			values[1] = CStringGetTextDatum(pgdc->request.body);
+			ret = SPI_execute_with_args(buf.data, 2, types, values, NULL,
+					false, 0);
+			if (ret != SPI_OK_INSERT)
+				elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+			tupdesc = SPI_tuptable->tupdesc;
+			tuptable = SPI_tuptable;
+			tuple = tuptable->vals[0];
+			appendStringInfo(&pgdc->reply.reason, "Created");
+		}
+		else
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf,
+					"UPDATE \"%s\" "
+					"SET document = $1 "
+					"WHERE id = $2",
+					pgdc->uric.tablename);
+			types[0] = JSONOID;
+			values[0] = CStringGetTextDatum(pgdc->request.body);
+			types[1] = TEXTOID;
+			values[1] = CStringGetTextDatum(pgdc->uric.id);
+			ret = SPI_execute_with_args(buf.data, 2, types, values, NULL,
+					false, 0);
+			if (ret != SPI_OK_UPDATE)
+				elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+			appendStringInfo(&pgdc->reply.reason, "Updated");
+		}
+		json_object_object_add(pgdc->jsono, "id",
+				json_object_new_string(pgdc->uric.id));
+	}
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+
+	pgdc->reply.status = 201;
+ }
 
 void
 pg_documents_create_document_table(struct pg_documents_context *pgdc)
@@ -174,6 +300,8 @@ pg_documents_create_document_table(struct pg_documents_context *pgdc)
 	TupleDesc tupdesc;
 	SPITupleTable *tuptable;
 	HeapTuple tuple;
+
+	pgdc->jsono = json_object_new_object();
 
 	SetCurrentStatementStartTimestamp();
 	StartTransactionCommand();
@@ -223,6 +351,56 @@ pg_documents_create_document_table(struct pg_documents_context *pgdc)
 			elog(FATAL, "SPI_execute failed: error code %d", ret);
 		json_object_object_add(pgdc->jsono, "ok",
 				json_object_new_boolean(1));
+		pgdc->reply.status = 200;
+		appendStringInfo(&pgdc->reply.reason, "OK");
+	}
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+}
+
+void
+pg_documents_delete_document(struct pg_documents_context *pgdc)
+{
+	int ret;
+	StringInfoData buf;
+	Oid types[1];
+	Datum values[1];
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	pgdc->jsono = json_object_new_object();
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "deleting document");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "DELETE FROM \"%s\" WHERE id = $1",
+			pgdc->uric.tablename);
+	types[0] = TEXTOID;
+	values[0] = CStringGetTextDatum(pgdc->uric.id);
+	ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, false, 0);
+	if (ret != SPI_OK_DELETE)
+		elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+	if (SPI_processed == 0)
+	{
+		json_object_object_add(pgdc->jsono, "ok", json_object_new_boolean(0));
+
+		pgdc->reply.status = 409;
+		appendStringInfo(&pgdc->reply.reason, "NOT_FOUND");
+	}
+	else if (SPI_processed == 1)
+	{
+		json_object_object_add(pgdc->jsono, "ok", json_object_new_boolean(1));
+
 		pgdc->reply.status = 200;
 		appendStringInfo(&pgdc->reply.reason, "OK");
 	}
@@ -285,6 +463,60 @@ pg_documents_free_context(struct pg_documents_context *pgdc)
 		pfree(pgdc->uric.id);
 
 	json_object_put(pgdc->jsono);
+}
+
+void
+pg_documents_get_document(struct pg_documents_context *pgdc)
+{
+	int ret;
+	StringInfoData buf;
+	Oid types[1];
+	Datum values[1];
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	elog(DEBUG1, "%s retrieving document", MyBgworkerEntry->bgw_name);
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "retrieving document");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "SELECT document FROM \"%s\" WHERE id = $1",
+			pgdc->uric.tablename);
+	types[0] = TEXTOID;
+	values[0] = CStringGetTextDatum(pgdc->uric.id);
+	ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, false, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "SPI_execute failed: error code %d", ret);
+
+	if (SPI_processed == 1)
+	{
+		tupdesc = SPI_tuptable->tupdesc;
+		tuptable = SPI_tuptable;
+		tuple = tuptable->vals[0];
+		pgdc->jsono = json_tokener_parse(SPI_getvalue(tuple, tupdesc, 1));
+		json_object_object_add(pgdc->jsono, "_id",
+				json_object_new_string(pgdc->uric.id));
+
+		pgdc->reply.status = 200;
+		appendStringInfo(&pgdc->reply.reason, "OK");
+	}
+	else
+	{
+		pgdc->jsono = json_object_new_object();
+		pgdc->reply.status = 404;
+		appendStringInfo(&pgdc->reply.reason, "NOT FOUND");
+	}
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
 }
 
 void
@@ -549,25 +781,44 @@ pg_documents_process_request(struct pg_documents_context *pgdc)
 	elog(DEBUG1, "%s processing http request", MyBgworkerEntry->bgw_name);
 
 	if (strcmp(pgdc->request.method, "DELETE") == 0)
-		pg_documents_delete_document_table(pgdc);
+	{
+		if (pgdc->uric.tablename != NULL && pgdc->uric.id == NULL)
+			pg_documents_delete_document_table(pgdc);
+		else if (pgdc->uric.tablename != NULL && pgdc->uric.id != NULL)
+			pg_documents_delete_document(pgdc);
+	}
 	else if (strcmp(pgdc->request.method, "GET") == 0)
 	{
-		pgdc->reply.status = 200;
-		appendStringInfo(&pgdc->reply.reason, "OK");
 		if (strcmp(pgdc->request.uri, "/") == 0)
 		{
 			pgdc->jsono = json_object_new_object();
 			json_object_object_add(pgdc->jsono, "postgresql",
 					json_object_new_string("Welcome"));
+			pgdc->reply.status = 200;
+			appendStringInfo(&pgdc->reply.reason, "OK");
 		}
 		else if (strcmp(pgdc->uric.tablename, "_all_dbs") == 0)
 			pg_documents_all_tables(pgdc);
+		else if (pgdc->uric.tablename != NULL && pgdc->uric.id != NULL)
+			pg_documents_get_document(pgdc);
+	}
+	else if (strcmp(pgdc->request.method, "POST") == 0)
+	{
+		if (pgdc->uric.tablename != NULL)
+			pg_documents_create_document(pgdc);
+		else
+		{
+			pgdc->reply.status = 500;
+			appendStringInfo(&pgdc->reply.reason, "CONFUSED");
+			pgdc->jsono = json_object_new_object();
+		}
 	}
 	else if (strcmp(pgdc->request.method, "PUT") == 0)
 	{
-		pgdc->jsono = json_object_new_object();
 		if (pgdc->uric.tablename != NULL && pgdc->uric.id == NULL)
 			pg_documents_create_document_table(pgdc);
+		else if (pgdc->uric.tablename != NULL && pgdc->uric.id != NULL)
+			pg_documents_create_document(pgdc);
 	}
 	else
 	{
