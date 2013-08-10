@@ -32,6 +32,20 @@
 
 PG_MODULE_MAGIC;
 
+struct pg_documents_request
+{
+	char *method;
+	char *uri;
+	char *version;
+	char *body;
+};
+
+struct pg_documents_uri_context
+{
+	char *tablename;
+	char *id;
+};
+
 struct pg_documents_reply
 {
 	int status;
@@ -40,7 +54,10 @@ struct pg_documents_reply
 
 struct pg_documents_context
 {
+	struct pg_documents_request request;
 	struct pg_documents_reply reply;
+
+	struct pg_documents_uri_context uric;
 
 	json_object *jsono;
 };
@@ -48,6 +65,7 @@ struct pg_documents_context
 void _PG_init(void);
 void pg_documents_free_context(struct pg_documents_context *);
 void pg_documents_main(Datum);
+void pg_documents_parse_request(struct pg_documents_context *, char *);
 void pg_documents_process_request(struct pg_documents_context *);
 void pg_documents_respond(struct pg_documents_context *, int);
 
@@ -94,6 +112,17 @@ void
 pg_documents_free_context(struct pg_documents_context *pgdc)
 {
 	resetStringInfo(&pgdc->reply.reason);
+
+	pfree(pgdc->request.method);
+	pfree(pgdc->request.uri);
+	pfree(pgdc->request.version);
+	if (pgdc->request.body != NULL)
+		pfree(pgdc->request.body);
+
+	if (pgdc->uric.tablename != NULL)
+		pfree(pgdc->uric.tablename);
+	if (pgdc->uric.id != NULL)
+		pfree(pgdc->uric.id);
 
 	json_object_put(pgdc->jsono);
 }
@@ -268,6 +297,7 @@ pg_documents_main(Datum main_arg)
 					memset(data, 0, sizeof(data));
 					received = recv(connectlist[i], data, length, 0);
 
+					pg_documents_parse_request(&pgdc, data);
 					pg_documents_process_request(&pgdc);
 					pg_documents_respond(&pgdc, connectlist[i]);
 
@@ -280,6 +310,71 @@ pg_documents_main(Datum main_arg)
 	}
 
 	proc_exit(1);
+}
+
+void
+pg_documents_parse_request(struct pg_documents_context *pgdc, char *data)
+{
+	char *token, *tofree, *string;
+	char *p;
+
+	elog(DEBUG1, "full http request: %s", data);
+
+	tofree = string = pstrdup(data);
+
+	/* Find where the header ends and the body begins. */
+	p = strstr(string, "\r\n\r\n");
+	if (p == NULL)
+	{
+		elog(WARNING, "invalid http request: %s", data);
+		return;
+	}
+
+	/* Extract the body from the request. */
+	if (strlen(p + 4) == 0)
+		pgdc->request.body = NULL;
+	else
+		pgdc->request.body = pstrdup(p + 4);
+
+	*p = '\0';
+
+	/* Tokenize the first line of the request. */
+	p = strstr(string, "\r\n");
+	*p = '\0';
+
+	pgdc->request.method = pstrdup(strsep(&string, " "));
+	pgdc->request.uri = pstrdup(strsep(&string, " "));
+	strsep(&string, "/");
+	pgdc->request.version = pstrdup(strsep(&string, "/"));
+
+	pfree(tofree);
+
+	/* Break down the uri. */
+	string = pstrdup(pgdc->request.uri + 1);
+
+	token = strsep(&string, "/");
+	if (strlen(token) > 0)
+	{
+		pgdc->uric.tablename = pstrdup(token);
+		token = strsep(&string, "/");
+		if (token != NULL && strlen(token) > 0)
+			pgdc->uric.id = pstrdup(token);
+		else
+			pgdc->uric.id = NULL;
+	}
+	else
+	{
+		pgdc->uric.tablename = NULL;
+		pgdc->uric.id = NULL;
+	}
+
+	elog(DEBUG1, "http method: %s", pgdc->request.method);
+	elog(DEBUG1, "uri: %s", pgdc->request.uri);
+	elog(DEBUG1, "http version: %s", pgdc->request.version);
+	elog(DEBUG1, "http request body: %s", pgdc->request.body);
+
+	elog(DEBUG1, "document tablename: %s", pgdc->uric.tablename);
+	elog(DEBUG1, "document id: %s", pgdc->uric.id);
 }
 
 void
