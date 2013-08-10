@@ -77,6 +77,7 @@ void pg_documents_delete_document(struct pg_documents_context *);
 void pg_documents_delete_document_table(struct pg_documents_context *);
 void pg_documents_free_context(struct pg_documents_context *);
 void pg_documents_get_document(struct pg_documents_context *);
+void pg_documents_get_document_table(struct pg_documents_context *);
 void pg_documents_main(Datum);
 void pg_documents_parse_request(struct pg_documents_context *, char *);
 void pg_documents_process_request(struct pg_documents_context *);
@@ -520,6 +521,58 @@ pg_documents_get_document(struct pg_documents_context *pgdc)
 }
 
 void
+pg_documents_get_document_table(struct pg_documents_context *pgdc)
+{
+	int ret;
+	StringInfoData buf;
+	Oid types[1];
+	Datum values[1];
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	pgdc->jsono = json_object_new_object();
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING,
+			"retrieving document table information");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+			"SELECT count(*), pg_total_relation_size($1) "
+			"FROM \"%s\"",
+			pgdc->uric.tablename);
+	types[0] = TEXTOID;
+	values[0] = CStringGetTextDatum(pgdc->uric.tablename);
+	ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, true, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+	tupdesc = SPI_tuptable->tupdesc;
+	tuptable = SPI_tuptable;
+	tuple = tuptable->vals[0];
+
+	json_object_object_add(pgdc->jsono, "table_name",
+			json_object_new_string(pgdc->uric.tablename));
+	json_object_object_add(pgdc->jsono, "doc_count",
+			json_object_new_string(SPI_getvalue(tuple, tupdesc, 1)));
+	json_object_object_add(pgdc->jsono, "disk_size",
+			json_object_new_string(SPI_getvalue(tuple, tupdesc, 2)));
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+
+	pgdc->reply.status = 200;
+	appendStringInfo(&pgdc->reply.reason, "OK");
+}
+
+void
 pg_documents_main(Datum main_arg)
 {
 	int i;
@@ -799,6 +852,8 @@ pg_documents_process_request(struct pg_documents_context *pgdc)
 		}
 		else if (strcmp(pgdc->uric.tablename, "_all_dbs") == 0)
 			pg_documents_all_tables(pgdc);
+		else if (pgdc->uric.tablename != NULL && pgdc->uric.id == NULL)
+			pg_documents_get_document_table(pgdc);
 		else if (pgdc->uric.tablename != NULL && pgdc->uric.id != NULL)
 			pg_documents_get_document(pgdc);
 	}

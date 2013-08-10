@@ -33,6 +33,10 @@ Drops a table.
 
 List all tables in the database.
 
+#### GET /tablename
+
+Document details in a table.
+
 #### PUT /tablename
 
 Creates a new table for storing documents.
