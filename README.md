@@ -20,3 +20,19 @@ pg_documents.port
 pg_documents.queue_depth
 
     Queue size for HTTPD listener.
+
+## HTTP API Reference
+
+### Table Methods
+
+#### DELETE /tablename
+
+Drops a table.
+
+#### GET /_all_dbs
+
+List all tables in the database.
+
+#### PUT /tablename
+
+Creates a new table for storing documents.

@@ -20,9 +20,15 @@
 #include "storage/shmem.h"
 
 /* these headers are used by this particular worker's code */
+#include "access/xact.h"
+#include "executor/spi.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "pgstat.h"
+#include "utils/builtins.h"
+#include "utils/snapmgr.h"
 #include "tcop/utility.h"
+#include <catalog/pg_type.h>
 
 #include "json-c/json.h"
 
@@ -64,6 +70,9 @@ struct pg_documents_context
 };
 
 void _PG_init(void);
+void pg_documents_all_tables(struct pg_documents_context *);
+void pg_documents_create_document_table(struct pg_documents_context *);
+void pg_documents_delete_document_table(struct pg_documents_context *);
 void pg_documents_free_context(struct pg_documents_context *);
 void pg_documents_main(Datum);
 void pg_documents_parse_request(struct pg_documents_context *, char *);
@@ -108,6 +117,155 @@ pg_documents_sighup(SIGNAL_ARGS)
 	got_sighup = true;
 	if (MyProc)
 		SetLatch(&MyProc->procLatch);
+}
+
+void
+pg_documents_all_tables(struct pg_documents_context *pgdc)
+{
+	int i;
+	int ret;
+	StringInfoData buf;
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	pgdc->jsono = json_object_new_array();
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "listing all tables");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+			"SELECT tablename FROM pg_tables WHERE schemaname = 'public'");
+	ret = SPI_execute(buf.data, true, 0);
+	elog(DEBUG1, "%d document tables found", SPI_processed);
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "SPI_execute failed: error code %d", ret);
+
+	for (i = 0; i < SPI_processed; i++)
+	{
+		tupdesc = SPI_tuptable->tupdesc;
+		tuptable = SPI_tuptable;
+		tuple = tuptable->vals[i];
+		json_object_array_add(pgdc->jsono,
+				json_object_new_string(SPI_getvalue(tuple, tupdesc, 1)));
+	}
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+}
+
+void
+pg_documents_create_document_table(struct pg_documents_context *pgdc)
+{
+	int ret;
+	StringInfoData buf;
+	int count;
+	Oid types[1];
+	Datum values[1];
+	bool isnull;
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "creating new document table");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+			"SELECT count(*) "
+			"FROM pg_tables "
+			"WHERE schemaname = 'public' "
+			"AND tablename = $1");
+	types[0] = TEXTOID;
+	values[0] = CStringGetTextDatum(pgdc->uric.tablename);
+	ret = SPI_execute_with_args(buf.data, 1, types, values, NULL, true, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(FATAL, "SPI_execute_with_args failed: error code %d", ret);
+
+	tupdesc = SPI_tuptable->tupdesc;
+	tuptable = SPI_tuptable;
+	tuple = tuptable->vals[0];
+
+	count = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+	if (count == 1)
+	{
+		json_object_object_add(pgdc->jsono, "error",
+				json_object_new_string("document_table_already_exists"));
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "Document table \"%s\" already exists.",
+				pgdc->uric.tablename);
+		json_object_object_add(pgdc->jsono, "reason",
+				json_object_new_string(buf.data));
+		pgdc->reply.status = 412;
+		appendStringInfo(&pgdc->reply.reason, "Precondition Failed");
+	}
+	else
+	{
+		resetStringInfo(&buf);
+		appendStringInfo(&buf,
+				"CREATE TABLE \"%s\" ("
+				"id VARCHAR(36) PRIMARY KEY DEFAULT uuid_generate_v4(), "
+				"document JSON NOT NULL DEFAULT '{}')",
+				pgdc->uric.tablename);
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret != SPI_OK_UTILITY)
+			elog(FATAL, "SPI_execute failed: error code %d", ret);
+		json_object_object_add(pgdc->jsono, "ok",
+				json_object_new_boolean(1));
+		pgdc->reply.status = 200;
+		appendStringInfo(&pgdc->reply.reason, "OK");
+	}
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+}
+
+void
+pg_documents_delete_document_table(struct pg_documents_context *pgdc)
+{
+	int ret;
+	StringInfoData buf;
+
+	TupleDesc tupdesc;
+	SPITupleTable *tuptable;
+	HeapTuple tuple;
+
+	pgdc->jsono = json_object_new_object();
+	json_object_object_add(pgdc->jsono, "ok", json_object_new_boolean(1));
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	SPI_connect();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	pgstat_report_activity(STATE_RUNNING, "dropping document table");
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "DROP TABLE IF EXISTS \"%s\"",
+			pgdc->uric.tablename);
+	ret = SPI_execute(buf.data, false, 0);
+	if (ret != SPI_OK_UTILITY)
+		elog(FATAL, "SPI_execute failed: error code %d", ret);
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	pgstat_report_activity(STATE_IDLE, NULL);
+
+	pgdc->reply.status = 200;
+	appendStringInfo(&pgdc->reply.reason, "OK");
 }
 
 void
@@ -388,12 +546,35 @@ pg_documents_parse_request(struct pg_documents_context *pgdc, char *data)
 void
 pg_documents_process_request(struct pg_documents_context *pgdc)
 {
-	pgdc->reply.status = 200;
-	appendStringInfo(&pgdc->reply.reason, "OK");
+	elog(DEBUG1, "%s processing http request", MyBgworkerEntry->bgw_name);
 
-	pgdc->jsono = json_object_new_object();
-	json_object_object_add(pgdc->jsono, "postgresql",
-			json_object_new_string("Welcome"));
+	if (strcmp(pgdc->request.method, "DELETE") == 0)
+		pg_documents_delete_document_table(pgdc);
+	else if (strcmp(pgdc->request.method, "GET") == 0)
+	{
+		pgdc->reply.status = 200;
+		appendStringInfo(&pgdc->reply.reason, "OK");
+		if (strcmp(pgdc->request.uri, "/") == 0)
+		{
+			pgdc->jsono = json_object_new_object();
+			json_object_object_add(pgdc->jsono, "postgresql",
+					json_object_new_string("Welcome"));
+		}
+		else if (strcmp(pgdc->uric.tablename, "_all_dbs") == 0)
+			pg_documents_all_tables(pgdc);
+	}
+	else if (strcmp(pgdc->request.method, "PUT") == 0)
+	{
+		pgdc->jsono = json_object_new_object();
+		if (pgdc->uric.tablename != NULL && pgdc->uric.id == NULL)
+			pg_documents_create_document_table(pgdc);
+	}
+	else
+	{
+		pgdc->reply.status = 200;
+		appendStringInfo(&pgdc->reply.reason, "OK");
+		pgdc->jsono = json_object_new_object();
+	}
 }
 
 void
