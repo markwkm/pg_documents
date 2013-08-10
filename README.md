@@ -5,6 +5,10 @@ v0.11.
 
 ## Configuration Paramters
 
+pg_documents.database
+
+    Name of database to connect to.
+
 pg_documents.max_sockets
 
     Maximum number of connections.

@@ -26,6 +26,7 @@
 
 #include "json-c/json.h"
 
+#define DEFAULT_PG_DOCUMENTS_DATABASE "documents"
 #define DEFAULT_PG_DOCUMENTS_MAX_SOCKETS 5
 #define DEFAULT_PG_DOCUMENTS_PORT 8888
 #define DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH 32
@@ -74,6 +75,7 @@ static volatile sig_atomic_t got_sighup = false;
 static volatile sig_atomic_t got_sigterm = false;
 
 /* GUC variables */
+static char *pg_documents_database = DEFAULT_PG_DOCUMENTS_DATABASE;
 static int pg_documents_max_sockets = DEFAULT_PG_DOCUMENTS_MAX_SOCKETS;
 static int pg_documents_port = DEFAULT_PG_DOCUMENTS_PORT;
 static int pg_documents_queue_depth = DEFAULT_PG_DOCUMENTS_QUEUE_DEPTH;
@@ -155,6 +157,12 @@ pg_documents_main(Datum main_arg)
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
+
+	/* Connect to our database */
+	BackgroundWorkerInitializeConnection(pg_documents_database, NULL);
+
+	elog(LOG, "%s connected to database %s", MyBgworkerEntry->bgw_name,
+			pg_documents_database);
 
 	/* Open a socket for incoming HTTP connections. */
 	val= 1;
@@ -423,6 +431,17 @@ _PG_init(void)
 	/* get the configuration */
 	if (!process_shared_preload_libraries_in_progress)
 		return;
+
+	DefineCustomStringVariable("pg_documents.database",
+			"Database to connect to.",
+			NULL,
+			&pg_documents_database,
+			DEFAULT_PG_DOCUMENTS_DATABASE,
+			PGC_POSTMASTER,
+			0,
+			NULL,
+			NULL,
+			NULL);
 
 	DefineCustomIntVariable("pg_documents.max_sockets",
 			"HTTPD maximum number of connected clients.",
