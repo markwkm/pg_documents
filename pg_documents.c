@@ -1387,9 +1387,7 @@ _PG_init(void)
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = 1;
 	worker.bgw_main = pg_documents_main;
-	worker.bgw_sighup = pg_documents_sighup;
-	worker.bgw_sigterm = pg_documents_sigterm;
-	worker.bgw_name = "pg_documents";
+	strncpy(worker.bgw_name, "pg_documents", BGW_MAXLEN);
 
 	RegisterBackgroundWorker(&worker);
 }
